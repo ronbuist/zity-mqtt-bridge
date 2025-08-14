@@ -1,0 +1,128 @@
+mqtt:
+  broker: broker.hostname.or.ip
+  port: 1883
+  username: your_username
+  password: your_password
+  base_topic: "zity"
+
+modbus:
+  method: rtu
+  port: "/dev/ttyUSB0"
+  baudrate: 9600
+  stopbits: 1
+  bytesize: 8
+  parity: "N"
+  slave_id: 1
+
+zones:
+  "1":
+    name: "Zone 1 - change to have a useful name in Home Assistant"
+    setpoint_read_register: 2700
+    setpoint_write_register: 2200
+    temp_read_register: 2680
+    status_read_register: 2720
+    status_write_register: 2140
+    damper_status_read_register: 2620
+    fan_mode_read_register: 2820
+    fan_mode_write_register: 2320
+    preset_mode_read_register: 4000
+    preset_mode_write_register: 2640
+    master_slave_register: 2120
+    fan_control_register: 2340
+
+  "2":
+    name: "Zone 2 - change to have a useful name in Home Assistant"
+    setpoint_read_register: 2701
+    setpoint_write_register: 2201
+    temp_read_register: 2681
+    status_read_register: 2721
+    status_write_register: 2141
+    damper_status_read_register: 2621
+    fan_mode_read_register: 2821
+    fan_mode_write_register: 2321
+    preset_mode_read_register: 4001
+    preset_mode_write_register: 2641
+    master_slave_register: 2121
+    fan_control_register: 2341
+
+  "3":
+    name: "Zone 3 - change to have a useful name in Home Assistant"
+    setpoint_read_register: 2702
+    setpoint_write_register: 2202
+    temp_read_register: 2682
+    status_read_register: 2722
+    status_write_register: 2142
+    damper_status_read_register: 2622
+    fan_mode_read_register: 2822
+    fan_mode_write_register: 2322
+    preset_mode_read_register: 4002
+    preset_mode_write_register: 2642
+    master_slave_register: 2122
+    fan_control_register: 2342
+
+  "4":
+    name: "Zone 4 - change to have a useful name in Home Assistant"
+    setpoint_read_register: 2703
+    setpoint_write_register: 2203
+    temp_read_register: 2683
+    status_read_register: 2723
+    status_write_register: 2143
+    damper_status_read_register: 2623
+    fan_mode_read_register: 2823
+    fan_mode_write_register: 2323
+    preset_mode_read_register: 4003
+    preset_mode_write_register: 2643
+    master_slave_register: 2123
+    fan_control_register: 2343
+
+  "5":
+    name: "Zone 5 - change to have a useful name in Home Assistant"
+    setpoint_read_register: 2704
+    setpoint_write_register: 2204
+    temp_read_register: 2684
+    status_read_register: 2724
+    status_write_register: 2144
+    damper_status_read_register: 2624
+    fan_mode_read_register: 2824
+    fan_mode_write_register: 2324
+    preset_mode_read_register: 4004
+    preset_mode_write_register: 2644
+    master_slave_register: 2124
+    fan_control_register: 2344
+
+  "6":
+    name: "Zone 6 - change to have a useful name in Home Assistant"
+    setpoint_read_register: 2705
+    setpoint_write_register: 2205
+    temp_read_register: 2685
+    status_read_register: 2725
+    status_write_register: 2145
+    damper_status_read_register: 2625
+    fan_mode_read_register: 2825
+    fan_mode_write_register: 2325
+    preset_mode_read_register: 4005
+    preset_mode_write_register: 2645
+    master_slave_register: 2125
+    fan_control_register: 2345
+
+trigger_register: 2086
+master_zone: "1"
+
+system_registers:
+  mode: 1040
+  power_mode: 2083
+  controller_mode: 2081
+  setpoint: 2008
+  fan_speed: 2009
+  flexifan_speed: 2085
+  return_temp: 2011
+  mode_write: 2220
+  power_mode_write: 2001
+
+alarm_registers:
+  2032: anti_ice
+  2036: max_return
+  2037: min_return
+  2087: heavybox
+
+loglevel: "ERROR"
