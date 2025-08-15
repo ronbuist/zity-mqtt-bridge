@@ -348,17 +348,16 @@ def on_message(client, userdata, msg):
             logger.error(f"Error setting system power mode: {e}")
         return
 
-    # Handle manual override set commands
-    if topic.endswith("/set_manual_override"):
-        zone_id = topic.split("/")[-2]
-        if zone_id in zones:
-            state = payload.upper() == "ON"
-            set_manual_override(zone_id, state)
-        return
-
     zone_id = topic.split("/")[-2]
     zone = zones.get(zone_id)
     if not zone:
+        return
+
+    # Handle manual override set commands. This does not require setting any registers
+    # so we handle this outside the try block.
+    if topic.endswith("/set_manual_override"):
+        state = payload.upper() == "ON"
+        set_manual_override(zone_id, state)
         return
 
     try:
@@ -548,4 +547,3 @@ while True:
     except Exception as e:
         logger.error(f"MQTT connection lost: {e}. Reconnecting in 5s...")
         time.sleep(5)
-      
