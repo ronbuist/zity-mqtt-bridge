@@ -6,6 +6,9 @@ import logging
 import paho.mqtt.client as mqtt
 from pymodbus.client.serial import ModbusSerialClient
 
+# ------------------ Lock ----------------------#
+state_lock = threading.Lock()
+
 # ------------------ Load Config ------------------ #
 with open("zity_config.yaml", "r") as f:
     config = yaml.safe_load(f)
@@ -21,6 +24,7 @@ slave_id = config["modbus"]["slave_id"]
 overall_status_register = system_registers["mode"]
 master_zone = config["master_zone"]
 loglevel = config["loglevel"]
+latency = config["latency"]
 
 # ------------------ Logging Setup ------------------ #
 logging.basicConfig(
@@ -35,6 +39,7 @@ manual_override_states = {zone_id: False for zone_id in zones}
 last_mqtt_values = {
     zone_id: {
         'reset': False,
+        'postpone': 0,
         'temp': None,
         'mode': None,
         'fan_mode': None,
@@ -209,11 +214,19 @@ def check_manual_override(zone_id, current_values):
     """Check if manual override should be activated for a zone"""
     global manual_override_states, last_mqtt_values
 
-    if manual_override_states[zone_id]:
-        # Already in override mode, don't check
-        return
+    check_needed = True
 
-    last_values = last_mqtt_values[zone_id]
+    # Aquire lock to make sure values are not being updated.
+    with state_lock:
+        if manual_override_states[zone_id]:
+            # Already in override mode, don't check
+            check_needed = False
+        last_values = last_mqtt_values[zone_id]
+
+    # If manual override is already active for the zone, don't check.
+    if not check_needed:
+        logger.info(f"Zone {zone_id}: Skipped; manual override already activated")
+        return
 
     # Check if any value has changed from what we last set via MQTT
     changes_detected = False
@@ -248,13 +261,19 @@ def check_manual_override(zone_id, current_values):
 
     if changes_detected:
         set_manual_override(zone_id, True)
+    else:
+        logger.info(f"Zone {zone_id}: No manual changes detected")
 
 def set_manual_override(zone_id, state):
     """Set manual override state for a zone"""
+
     global manual_override_states, last_mqtt_values
 
-    last_mqtt_values[zone_id]['reset'] = not(state)
-    manual_override_states[zone_id] = state
+    # Acquire lock to make sure values are not being used anywhere else while we're updating.
+    with state_lock:
+        last_mqtt_values[zone_id]['reset'] = not(state)
+        manual_override_states[zone_id] = state
+
     payload = "ON" if state else "OFF"
     client.publish(f"{base_topic}/zone/{zone_id}/manual_override", payload, retain=True)
     logger.info(f"Zone {zone_id}: Manual override set to {payload}")
@@ -325,14 +344,17 @@ def on_message(client, userdata, msg):
             time.sleep(0.2)
             if payload in state_list:
                 idx = state_list.index(payload)
-                mb.write_registers(system_mode_write_register, [idx], slave=slave_id)
-                client.publish(f"{base_topic}/system/mode", payload, retain=True)
-                logger.info(f"System mode set to {payload}")
-                # Update last_mqtt_values for all zones
-                for zid in zones:
-                    last_mqtt_values[zid]['mode'] = payload
-                    client.publish(f"{base_topic}/zone/{zid}/mode", payload, retain=True)
-                    logger.info(f"Zone {zid}: mode set to {payload}")
+                # Changing registers and last_mqtt_values, so acquire lock
+                with state_lock:
+                    mb.write_registers(system_mode_write_register, [idx], slave=slave_id)
+                    client.publish(f"{base_topic}/system/mode", payload, retain=True)
+                    logger.info(f"System mode set to {payload}")
+                    # Update last_mqtt_values for all zones.
+                    for zid in zones:
+                        last_mqtt_values[zid]['mode'] = payload
+                        last_mqtt_values[zid]['postpone'] = latency
+                        client.publish(f"{base_topic}/zone/{zid}/mode", payload, retain=True)
+                        logger.info(f"Zone {zid}: mode set to {payload}")
         except Exception as e:
             logger.error(f"Error setting system mode: {e}")
         return
@@ -366,23 +388,26 @@ def on_message(client, userdata, msg):
 
         if topic.endswith("/set_temp"):
             value = int(float(payload) * 10)
-            mb.write_registers(zone["setpoint_write_register"], [value], slave=slave_id)
+            with state_lock:
+                mb.write_registers(zone["setpoint_write_register"], [value], slave=slave_id)
+                # Store the MQTT value.
+                last_mqtt_values[zone_id]['temp'] = float(payload)
+                last_mqtt_values[zone_id]['postpone'] = latency
             client.publish(f"{base_topic}/zone/{zone_id}/setpoint", payload, retain=True)
             logger.info(f"Zone {zone_id}: setpoint set to {payload}")
-            # Store the MQTT value
-            last_mqtt_values[zone_id]['temp'] = float(payload)
 
         elif topic.endswith("/set_mode"):
             value = 0 if payload.lower() == "off" else 1
-            mb.write_registers(zone["status_write_register"], [value], slave=slave_id)
             overall_status_result = mb.read_input_registers(overall_status_register, 1, slave=slave_id)
             if payload.lower() != "off":
                 payload = state_list[overall_status_result.registers[0]]
+            with state_lock:
+                mb.write_registers(zone["status_write_register"], [value], slave=slave_id)
+                # Store the MQTT value
+                last_mqtt_values[zone_id]['mode'] = payload
+                last_mqtt_values[zone_id]['postpone'] = latency
             client.publish(f"{base_topic}/zone/{zone_id}/mode", payload, retain=True)
             logger.info(f"Zone {zone_id}: mode set to {payload}")
-            # Store the MQTT value
-            last_mqtt_values[zone_id]['mode'] = payload
-
         elif topic.endswith("/set_fan_mode"):
             value = fan_mode_list.index(payload.lower())
             for zid, zconf in zones.items():
@@ -393,20 +418,23 @@ def on_message(client, userdata, msg):
                 mb.write_registers(zconf["fan_control_register"], [1], slave=slave_id)
                 time.sleep(0.1)
                 mb.write_registers(trigger_register, [1], slave=slave_id)
-            mb.write_registers(zone["fan_mode_write_register"], [value], slave=slave_id)
+            with state_lock:
+                mb.write_registers(zone["fan_mode_write_register"], [value], slave=slave_id)
+                # Store the MQTT value
+                last_mqtt_values[zone_id]['fan_mode'] = payload.lower()
+                last_mqtt_values[zone_id]['postpone'] = latency
             client.publish(f"{base_topic}/zone/{zone_id}/fan_mode", payload.lower(), retain=True)
             logger.info(f"Zone {zone_id}: fan mode set to {payload}")
-            # Store the MQTT value
-            last_mqtt_values[zone_id]['fan_mode'] = payload.lower()
 
         elif topic.endswith("/set_preset_mode"):
             value = 0 if payload.lower() == "none" else 1
-            mb.write_registers(zone["preset_mode_write_register"], [value], slave=slave_id)
-            overall_status_result = mb.read_input_registers(overall_status_register, 1, slave=slave_id)
+            with state_lock:
+                mb.write_registers(zone["preset_mode_write_register"], [value], slave=slave_id)
+                # Store the MQTT value
+                last_mqtt_values[zone_id]['preset_mode'] = payload
+                last_mqtt_values[zone_id]['postpone'] = latency
             client.publish(f"{base_topic}/zone/{zone_id}/preset_mode", payload, retain=True)
             logger.info(f"Zone {zone_id}: preset mode set to {payload}")
-            # Store the MQTT value
-            last_mqtt_values[zone_id]['preset_mode'] = payload
 
     except Exception as e:
         logger.error(f"MQTT message error: {e}")
@@ -426,58 +454,85 @@ def poll_zone_status():
                 time.sleep(5)
                 continue
         try:
-            mode_val = mb.read_input_registers(system_registers["mode"], 1, slave=slave_id).registers[0]
+            with state_lock:
+                mode_val = mb.read_input_registers(system_registers["mode"], 1, slave=slave_id).registers[0]
         except Exception as e:
             logger.error(f"Error reading system mode: {e}")
-            mode_val = 0
+            time.sleep(5)
+            continue
 
         for zone_id, zone in zones.items():
             try:
-                temp = mb.read_input_registers(zone["temp_read_register"], 1, slave=slave_id).registers[0] / 10.0
-                setpoint = mb.read_input_registers(zone["setpoint_read_register"], 1, slave=slave_id).registers[0] / 10.0
-                damper = mb.read_input_registers(zone["damper_status_read_register"], 1, slave=slave_id).registers[0]
-                power = mb.read_input_registers(zone["status_read_register"], 1, slave=slave_id).registers[0]
-                fan_mode = mb.read_input_registers(zone["fan_mode_read_register"], 1, slave=slave_id).registers[0]
-                preset_mode = mb.read_input_registers(zone["preset_mode_read_register"], 1, slave=slave_id).registers[0]
+                with state_lock:
+                    do_override_check = (last_mqtt_values[zone_id]['postpone'] == 0)
+                    temp = mb.read_input_registers(zone["temp_read_register"], 1, slave=slave_id).registers[0] / 10.0
+                    setpoint = mb.read_input_registers(zone["setpoint_read_register"], 1, slave=slave_id).registers[0] / 10.0
+                    damper = mb.read_input_registers(zone["damper_status_read_register"], 1, slave=slave_id).registers[0]
+                    power = mb.read_input_registers(zone["status_read_register"], 1, slave=slave_id).registers[0]
+                    fan_mode = mb.read_input_registers(zone["fan_mode_read_register"], 1, slave=slave_id).registers[0]
+                    preset_mode = mb.read_input_registers(zone["preset_mode_read_register"], 1, slave=slave_id).registers[0]
 
-                mode = "off" if power == 0 else state_list[mode_val]
-                fan_mode_str = fan_mode_list[fan_mode]
-                preset_mode_str = "eco" if preset_mode else "none"
+                    mode = "off" if power == 0 else state_list[mode_val]
+                    fan_mode_str = fan_mode_list[fan_mode]
+                    preset_mode_str = "eco" if preset_mode else "none"
 
-                # Prepare current values for manual override check
-                current_values = {
-                    'setpoint': setpoint,
-                    'mode': mode,
-                    'fan_mode': fan_mode_str,
-                    'preset_mode': preset_mode_str
-                }
+                    # Prepare current values for manual override check
+                    current_values = {
+                        'setpoint': setpoint,
+                        'mode': mode,
+                        'fan_mode': fan_mode_str,
+                        'preset_mode': preset_mode_str
+                    }
 
-                # On first poll, initialize last_mqtt_values with current values
-                # This prevents false positives after restart.
-                # Also do this if the manual override switch was reset to "off". In this case, we must
-                # act as if the current values are the last ones sent through MQTT.
-                if (not first_poll_completed  and temp > 10 and temp < 50 and setpoint > 10 and setpoint < 50) or (last_mqtt_values[zone_id]['reset']):
-                    last_mqtt_values[zone_id]['temp'] = setpoint
-                    last_mqtt_values[zone_id]['mode'] = mode
-                    last_mqtt_values[zone_id]['fan_mode'] = fan_mode_str
-                    last_mqtt_values[zone_id]['preset_mode'] = preset_mode_str
-                    last_mqtt_values[zone_id]['reset'] = False
+                    # On first poll, initialize last_mqtt_values with current values
+                    # This prevents false positives after restart.
+                    # Also do this if the manual override switch was reset to "off". In this case, we must
+                    # act as if the current values are the last ones sent through MQTT.
+                    if (not first_poll_completed  and temp > 10 and temp < 50 and setpoint > 10 and setpoint < 50) or (last_mqtt_values[zone_id]['reset']):
+                        last_mqtt_values[zone_id]['temp'] = setpoint
+                        last_mqtt_values[zone_id]['mode'] = mode
+                        last_mqtt_values[zone_id]['fan_mode'] = fan_mode_str
+                        last_mqtt_values[zone_id]['preset_mode'] = preset_mode_str
+                        last_mqtt_values[zone_id]['reset'] = False
 
-                # Check for manual override (only if values are valid and not first poll)
-                elif temp > 10 and temp < 50 and setpoint > 10 and setpoint < 50:
+                # Check for manual override (only if values are valid, not first poll and not right after the zone was updated through MQTT)
+                if first_poll_completed and temp > 10 and temp < 50 and setpoint > 10 and setpoint < 50 and do_override_check:
                     check_manual_override(zone_id, current_values)
+                elif not first_poll_completed:
+                    logger.info(f"Zone {zone_id}: Waiting for first poll to complete.")
+                elif do_override_check:
+                    logger.info(f"Zone {zone_id}: Invalid temperature or setpoint values found; skipping override check.")
+                else:
+                    with state_lock:
+                        waits = last_mqtt_values[zone_id]['postpone']
+                        logger.info(f"Zone {zone_id}: Manual override check postponed. Waits: {waits}.")
+                        last_mqtt_values[zone_id]['postpone'] -= 1
+
+                # Publish the values we cannot change through MQTT.
 
                 # Sometimes, right after (re-) starting the Zity, it comes up with incorrect values. Don't publish these.
                 if temp > 10 and temp < 50:
                     client.publish(f"{base_topic}/zone/{zone_id}/temp", temp, retain=True)
-                if setpoint > 10 and setpoint < 50:
-                    client.publish(f"{base_topic}/zone/{zone_id}/setpoint", setpoint, retain=True)
                 client.publish(f"{base_topic}/zone/{zone_id}/damper_status", "open" if damper else "closed", retain=True)
-                client.publish(f"{base_topic}/zone/{zone_id}/power", "on" if power else "off", retain=True)
-                client.publish(f"{base_topic}/zone/{zone_id}/mode", mode, retain=True)
-                client.publish(f"{base_topic}/zone/{zone_id}/fan_mode", fan_mode_str, retain=True)
-                client.publish(f"{base_topic}/zone/{zone_id}/preset_mode", preset_mode_str, retain=True)
+
+                # Only publish the values that can be changed if there were no recent MQTT changes. This gives the Zity
+                # some time to propagate the settings from the write to the read registers. Otherwise, this might publish
+                # one or more older values.
+
+                if do_override_check:
+
+                    logger.info(f"Zone {zone_id}: Publishing values.")
+                    if setpoint > 10 and setpoint < 50:
+                        client.publish(f"{base_topic}/zone/{zone_id}/setpoint", setpoint, retain=True)
+                    client.publish(f"{base_topic}/zone/{zone_id}/power", "on" if power else "off", retain=True)
+                    client.publish(f"{base_topic}/zone/{zone_id}/mode", mode, retain=True)
+                    client.publish(f"{base_topic}/zone/{zone_id}/fan_mode", fan_mode_str, retain=True)
+                    client.publish(f"{base_topic}/zone/{zone_id}/preset_mode", preset_mode_str, retain=True)
+                else:
+                    logger.info(f"Zone {zone_id}: Postponing MQTT messages. Values in dict: {current_values}.")
+
                 logger.debug(f"Zone {zone_id} status: setpoint '{setpoint}', damper '{damper}', power '{power}', mode '{mode}', fan_mode '{fan_mode}', fan_mode_str '{fan_mode_str}', preset_mode '{preset_mode}', preset_mode_str '{preset_mode_str}'")
+
 
             except Exception as e:
                 logger.error(f"Polling error in zone {zone_id}: {e}")
