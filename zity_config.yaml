@@ -125,4 +125,6 @@ alarm_registers:
   2037: min_return
   2087: heavybox
 
+latency: 4
+
 loglevel: "ERROR"
