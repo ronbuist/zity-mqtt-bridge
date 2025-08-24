@@ -349,12 +349,15 @@ def on_message(client, userdata, msg):
                     mb.write_registers(system_mode_write_register, [idx], slave=slave_id)
                     client.publish(f"{base_topic}/system/mode", payload, retain=True)
                     logger.info(f"System mode set to {payload}")
-                    # Update last_mqtt_values for all zones.
+                    # Update last_mqtt_values for all zones, but only if the zone is not "off"
                     for zid in zones:
-                        last_mqtt_values[zid]['mode'] = payload
-                        last_mqtt_values[zid]['postpone'] = latency
-                        client.publish(f"{base_topic}/zone/{zid}/mode", payload, retain=True)
-                        logger.info(f"Zone {zid}: mode set to {payload}")
+                        if last_mqtt_values[zid]['mode'] != "off":
+                            last_mqtt_values[zid]['mode'] = payload
+                            last_mqtt_values[zid]['postpone'] = latency
+                            client.publish(f"{base_topic}/zone/{zid}/mode", payload, retain=True)
+                            logger.info(f"Zone {zid}: mode set to {payload}")
+                        else:
+                            logger.info(f"Zone {zid}: zone is switched off; remains off")
         except Exception as e:
             logger.error(f"Error setting system mode: {e}")
         return
@@ -602,3 +605,4 @@ while True:
     except Exception as e:
         logger.error(f"MQTT connection lost: {e}. Reconnecting in 5s...")
         time.sleep(5)
+        
